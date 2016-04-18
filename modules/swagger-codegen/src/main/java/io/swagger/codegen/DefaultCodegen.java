@@ -1,0 +1,2695 @@
+package io.swagger.codegen;
+
+import com.google.common.base.Function;
+import com.google.common.collect.Lists;
+import io.swagger.codegen.examples.ExampleGenerator;
+import io.swagger.models.*;
+import io.swagger.models.auth.*;
+import io.swagger.models.parameters.*;
+import io.swagger.models.properties.*;
+import io.swagger.models.properties.PropertyBuilder.PropertyId;
+import io.swagger.util.Json;
+import org.apache.commons.lang.StringEscapeUtils;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
+import java.io.File;
+import java.util.*;
+import java.util.Map.Entry;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+
+public class DefaultCodegen {
+    protected static final Logger LOGGER = LoggerFactory.getLogger(DefaultCodegen.class);
+
+    protected String outputFolder = "";
+    protected Set<String> defaultIncludes = new HashSet<String>();
+    protected Map<String, String> typeMapping = new HashMap<String, String>();
+    protected Map<String, String> instantiationTypes = new HashMap<String, String>();
+    protected Set<String> reservedWords = new HashSet<String>();
+    protected Set<String> languageSpecificPrimitives = new HashSet<String>();
+    protected Map<String, String> importMapping = new HashMap<String, String>();
+    protected String modelPackage = "", apiPackage = "", fileSuffix;
+    protected String modelNamePrefix = "", modelNameSuffix = "";
+    protected String testPackage = "";
+    protected Map<String, String> apiTemplateFiles = new HashMap<String, String>();
+    protected Map<String, String> modelTemplateFiles = new HashMap<String, String>();
+    protected Map<String, String> apiTestTemplateFiles = new HashMap<String, String>();
+    protected Map<String, String> modelTestTemplateFiles = new HashMap<String, String>();
+    protected Map<String, String> apiDocTemplateFiles = new HashMap<String, String>();
+    protected Map<String, String> modelDocTemplateFiles = new HashMap<String, String>();
+    protected String templateDir;
+    protected String embeddedTemplateDir;
+    protected Map<String, Object> additionalProperties = new HashMap<String, Object>();
+    protected Map<String, Object> vendorExtensions = new HashMap<String, Object>();
+    protected List<SupportingFile> supportingFiles = new ArrayList<SupportingFile>();
+    protected List<CliOption> cliOptions = new ArrayList<CliOption>();
+    protected boolean skipOverwrite;
+    protected boolean supportsInheritance;
+    protected Map<String, String> supportedLibraries = new LinkedHashMap<String, String>();
+    protected String library;
+    protected Boolean sortParamsByRequiredFlag = true;
+    protected Boolean ensureUniqueParams = true;
+    protected String gitUserId, gitRepoId, releaseNote;
+    protected String httpUserAgent;
+
+    public List<CliOption> cliOptions() {
+        return cliOptions;
+    }
+
+    public void processOpts() {
+        if (additionalProperties.containsKey(CodegenConstants.TEMPLATE_DIR)) {
+            this.setTemplateDir((String) additionalProperties.get(CodegenConstants.TEMPLATE_DIR));
+        }
+
+        if (additionalProperties.containsKey(CodegenConstants.MODEL_PACKAGE)) {
+            this.setModelPackage((String) additionalProperties.get(CodegenConstants.MODEL_PACKAGE));
+        }
+
+        if (additionalProperties.containsKey(CodegenConstants.API_PACKAGE)) {
+            this.setApiPackage((String) additionalProperties.get(CodegenConstants.API_PACKAGE));
+        }
+
+        if (additionalProperties.containsKey(CodegenConstants.SORT_PARAMS_BY_REQUIRED_FLAG)) {
+            this.setSortParamsByRequiredFlag(Boolean.valueOf(additionalProperties
+                    .get(CodegenConstants.SORT_PARAMS_BY_REQUIRED_FLAG).toString()));
+        }
+
+        if (additionalProperties.containsKey(CodegenConstants.ENSURE_UNIQUE_PARAMS)) {
+            this.setEnsureUniqueParams(Boolean.valueOf(additionalProperties
+                    .get(CodegenConstants.ENSURE_UNIQUE_PARAMS).toString()));
+        }
+
+        if(additionalProperties.containsKey(CodegenConstants.MODEL_NAME_PREFIX)){
+            this.setModelNamePrefix((String) additionalProperties.get(CodegenConstants.MODEL_NAME_PREFIX));
+        }
+
+        if(additionalProperties.containsKey(CodegenConstants.MODEL_NAME_SUFFIX)){
+            this.setModelNameSuffix((String) additionalProperties.get(CodegenConstants.MODEL_NAME_SUFFIX));
+        }
+
+    }
+
+    // override with any special post-processing for all models
+    @SuppressWarnings({ "static-method", "unchecked" })
+    public Map<String, Object> postProcessAllModels(Map<String, Object> objs) {
+        if (supportsInheritance) {
+            // Index all CodegenModels by name.
+            Map<String, CodegenModel> allModels = new HashMap<String, CodegenModel>();
+            for (Entry<String, Object> entry : objs.entrySet()) {
+                String modelName = entry.getKey();
+                Map<String, Object> inner = (Map<String, Object>) entry.getValue();
+                List<Map<String, Object>> models = (List<Map<String, Object>>) inner.get("models");
+                for (Map<String, Object> mo : models) {
+                    CodegenModel cm = (CodegenModel) mo.get("model");
+                    allModels.put(modelName, cm);
+                }
+            }
+            // Fix up all parent and interface CodegenModel references.
+            for (CodegenModel cm : allModels.values()) {
+                if (cm.parent != null) {
+                    cm.parentModel = allModels.get(cm.parent);
+                }
+                if (cm.interfaces != null && !cm.interfaces.isEmpty()) {
+                    cm.interfaceModels = new ArrayList<CodegenModel>(cm.interfaces.size());
+                    for (String intf : cm.interfaces) {
+                        CodegenModel intfModel = allModels.get(intf);
+                        if (intfModel != null) {
+                            cm.interfaceModels.add(intfModel);
+                        }
+                    }
+                }
+            }
+        }
+        return objs;
+    }
+
+    // override with any special post-processing
+    @SuppressWarnings("static-method")
+    public Map<String, Object> postProcessModels(Map<String, Object> objs) {
+        return objs;
+    }
+
+
+    // override with any special post-processing
+    @SuppressWarnings("static-method")
+    public Map<String, Object> postProcessOperations(Map<String, Object> objs) {
+        return objs;
+    }
+
+    // override with any special post-processing
+    @SuppressWarnings("static-method")
+    public Map<String, Object> postProcessSupportingFileData(Map<String, Object> objs) {
+        return objs;
+    }
+
+    // override to post-process any model properties
+    @SuppressWarnings("unused")
+    public void postProcessModelProperty(CodegenModel model, CodegenProperty property){
+    }
+
+    // override to post-process any parameters
+    @SuppressWarnings("unused")
+    public void postProcessParameter(CodegenParameter parameter){
+    }
+
+    //override with any special handling of the entire swagger spec
+    @SuppressWarnings("unused")
+    public void preprocessSwagger(Swagger swagger) {
+    }
+
+    // override with any special handling of the entire swagger spec
+    @SuppressWarnings("unused")
+    public void processSwagger(Swagger swagger) {
+    }
+
+    // override with any special text escaping logic
+    @SuppressWarnings("static-method")
+    public String escapeText(String input) {
+        if (input != null) {
+            return StringEscapeUtils.escapeJava(input).replace("\\/", "/");
+        }
+        return input;
+    }
+
+    public Set<String> defaultIncludes() {
+        return defaultIncludes;
+    }
+
+    public Map<String, String> typeMapping() {
+        return typeMapping;
+    }
+
+    public Map<String, String> instantiationTypes() {
+        return instantiationTypes;
+    }
+
+    public Set<String> reservedWords() {
+        return reservedWords;
+    }
+
+    public Set<String> languageSpecificPrimitives() {
+        return languageSpecificPrimitives;
+    }
+
+    public Map<String, String> importMapping() {
+        return importMapping;
+    }
+
+    public String testPackage() {
+        return testPackage;
+    }
+
+    public String modelPackage() {
+        return modelPackage;
+    }
+
+    public String apiPackage() {
+        return apiPackage;
+    }
+
+    public String fileSuffix() {
+        return fileSuffix;
+    }
+
+    public String templateDir() {
+        return templateDir;
+    }
+
+    public String embeddedTemplateDir() {
+        if (embeddedTemplateDir != null) {
+            return embeddedTemplateDir;
+        } else {
+            return templateDir;
+        }
+    }
+
+    public Map<String, String> apiDocTemplateFiles() {
+        return apiDocTemplateFiles;
+    }
+
+    public Map<String, String> modelDocTemplateFiles() {
+        return modelDocTemplateFiles;
+    }
+
+    public Map<String, String> apiTestTemplateFiles() {
+        return apiTestTemplateFiles;
+    }
+
+    public Map<String, String> modelTestTemplateFiles() {
+        return modelTestTemplateFiles;
+    }
+
+    public Map<String, String> apiTemplateFiles() {
+        return apiTemplateFiles;
+    }
+
+    public Map<String, String> modelTemplateFiles() {
+        return modelTemplateFiles;
+    }
+
+    public String apiFileFolder() {
+        return outputFolder + "/" + apiPackage().replace('.', '/');
+    }
+
+    public String modelFileFolder() {
+        return outputFolder + "/" + modelPackage().replace('.', '/');
+    }
+
+    public String apiTestFileFolder() {
+        return outputFolder + "/" + testPackage().replace('.', '/');
+    }
+
+    public String modelTestFileFolder() {
+        return outputFolder + "/" + testPackage().replace('.', '/');
+    }
+
+    public String apiDocFileFolder() {
+        return outputFolder;
+    }
+
+    public String modelDocFileFolder() {
+        return outputFolder;
+    }
+
+    public Map<String, Object> additionalProperties() {
+        return additionalProperties;
+    }
+
+    public Map<String, Object> vendorExtensions() {
+        return vendorExtensions;
+    }
+
+    public List<SupportingFile> supportingFiles() {
+        return supportingFiles;
+    }
+
+    public String outputFolder() {
+        return outputFolder;
+    }
+
+    public void setOutputDir(String dir) {
+        this.outputFolder = dir;
+    }
+
+    public String getOutputDir() {
+        return outputFolder();
+    }
+
+    public void setTemplateDir(String templateDir) {
+        this.templateDir = templateDir;
+    }
+
+    public void setModelPackage(String modelPackage) {
+        this.modelPackage = modelPackage;
+    }
+
+    public void setModelNamePrefix(String modelNamePrefix){
+        this.modelNamePrefix = modelNamePrefix;
+    }
+
+    public void setModelNameSuffix(String modelNameSuffix){
+        this.modelNameSuffix = modelNameSuffix;
+    }
+
+    public void setApiPackage(String apiPackage) {
+        this.apiPackage = apiPackage;
+    }
+
+    public void setSortParamsByRequiredFlag(Boolean sortParamsByRequiredFlag) {
+        this.sortParamsByRequiredFlag = sortParamsByRequiredFlag;
+    }
+
+    public void setEnsureUniqueParams(Boolean ensureUniqueParams) {
+        this.ensureUniqueParams = ensureUniqueParams;
+    }
+
+    /**
+     * Return the file name of the Api Test
+     *
+     * @param name the file name of the Api
+     * @return the file name of the Api
+     */
+    public String toApiFilename(String name) {
+        return toApiName(name);
+    }
+
+    /**
+     * Return the file name of the Api Documentation 
+     * 
+     * @param name the file name of the Api
+     * @return the file name of the Api
+     */
+    public String toApiDocFilename(String name) {
+        return toApiName(name);
+    }
+
+    /**
+     * Return the file name of the Api Test
+     *
+     * @param name the file name of the Api
+     * @return the file name of the Api
+     */
+    public String toApiTestFilename(String name) {
+        return toApiName(name) + "Test";
+    }
+
+    /**
+     * Return the variable name in the Api
+     *
+     * @param name the varible name of the Api
+     * @return the snake-cased variable name
+     */
+    public String toApiVarName(String name) {
+        return snakeCase(name);
+    }
+
+    /**
+     * Return the capitalized file name of the model
+     *
+     * @param name the model name
+     * @return the file name of the model
+     */
+    public String toModelFilename(String name) {
+        return initialCaps(name);
+    }
+
+    /**
+     * Return the capitalized file name of the model test
+     *
+     * @param name the model name
+     * @return the file name of the model
+     */
+    public String toModelTestFilename(String name) {
+        return initialCaps(name) + "Test";
+    }
+
+    /**
+     * Return the capitalized file name of the model documentation
+     * 
+     * @param name the model name
+     * @return the file name of the model
+     */
+    public String toModelDocFilename(String name) {
+        return initialCaps(name);
+    }
+    
+    /**
+     * Return the operation ID (method name)
+     *
+     * @param operationId operation ID
+     * @return the sanitized method name
+     */
+    @SuppressWarnings("static-method")
+    public String toOperationId(String operationId) {
+        // throw exception if method name is empty
+        if (StringUtils.isEmpty(operationId)) {
+            throw new RuntimeException("Empty method name (operationId) not allowed");
+        }
+
+        return operationId;
+    }
+
+    /**
+     * Return the variable name by removing invalid characters and proper escaping if
+     * it's a reserved word.
+     *
+     * @param name the variable name
+     * @return the sanitized variable name
+     */
+    public String toVarName(String name) {
+        if (reservedWords.contains(name)) {
+            return escapeReservedWord(name);
+        } else {
+            return name;
+        }
+    }
+
+    /**
+     * Return the parameter name by removing invalid characters and proper escaping if
+     * it's a reserved word.
+     *
+     * @param name Codegen property object
+     * @return the sanitized parameter name
+     */
+    public String toParamName(String name) {
+        name = removeNonNameElementToCamelCase(name); // FIXME: a parameter should not be assigned. Also declare the methods parameters as 'final'.
+        if (reservedWords.contains(name)) {
+            return escapeReservedWord(name);
+        }
+        return name;
+    }
+
+    /**
+     * Return the Enum name (e.g. StatusEnum given 'status')
+     *
+     * @param property Codegen property object
+     * @return the Enum name
+     */
+    @SuppressWarnings("static-method")
+    public String toEnumName(CodegenProperty property) {
+        return StringUtils.capitalize(property.name) + "Enum";
+    }
+
+    /**
+     * Return the escaped name of the reserved word
+     *
+     * @param name the name to be escaped
+     * @return the escaped reserved word
+     *
+     * throws Runtime exception as reserved word is not allowed (default behavior)
+     */
+    @SuppressWarnings("static-method")
+    public String escapeReservedWord(String name) {
+        throw new RuntimeException("reserved word " + name + " not allowed");
+    }
+
+    /**
+     * Return the fully-qualified "Model" name for import
+     *
+     * @param name the name of the "Model"
+     * @return the fully-qualified "Model" name for import
+     */
+    public String toModelImport(String name) {
+        if ("".equals(modelPackage())) {
+            return name;
+        } else {
+            return modelPackage() + "." + name;
+        }
+    }
+
+    /**
+     * Return the fully-qualified "Api" name for import
+     *
+     * @param name the name of the "Api"
+     * @return the fully-qualified "Api" name for import
+     */
+    public String toApiImport(String name) {
+        return apiPackage() + "." + name;
+    }
+
+    /**
+     * Default constructor.
+     * This method will map between Swagger type and language-specified type, as well as mapping
+     * between Swagger type and the corresponding import statement for the language. This will
+     * also add some language specified CLI options, if any.
+     *
+     *
+     * returns string presentation of the example path (it's a constructor)
+     */
+    public DefaultCodegen() {
+        defaultIncludes = new HashSet<String>(
+                Arrays.asList("double",
+                        "int",
+                        "long",
+                        "short",
+                        "char",
+                        "float",
+                        "String",
+                        "boolean",
+                        "Boolean",
+                        "Double",
+                        "Void",
+                        "Integer",
+                        "Long",
+                        "Float")
+        );
+
+        typeMapping = new HashMap<String, String>();
+        typeMapping.put("array", "List");
+        typeMapping.put("map", "Map");
+        typeMapping.put("List", "List");
+        typeMapping.put("boolean", "Boolean");
+        typeMapping.put("string", "String");
+        typeMapping.put("int", "Integer");
+        typeMapping.put("float", "Float");
+        typeMapping.put("number", "BigDecimal");
+        typeMapping.put("DateTime", "Date");
+        typeMapping.put("long", "Long");
+        typeMapping.put("short", "Short");
+        typeMapping.put("char", "String");
+        typeMapping.put("double", "Double");
+        typeMapping.put("object", "Object");
+        typeMapping.put("integer", "Integer");
+        typeMapping.put("ByteArray", "byte[]");
+        typeMapping.put("binary", "byte[]");
+
+
+        instantiationTypes = new HashMap<String, String>();
+
+        reservedWords = new HashSet<String>();
+
+        importMapping = new HashMap<String, String>();
+        importMapping.put("BigDecimal", "java.math.BigDecimal");
+        importMapping.put("UUID", "java.util.UUID");
+        importMapping.put("File", "java.io.File");
+        importMapping.put("Date", "java.util.Date");
+        importMapping.put("Timestamp", "java.sql.Timestamp");
+        importMapping.put("Map", "java.util.Map");
+        importMapping.put("HashMap", "java.util.HashMap");
+        importMapping.put("Array", "java.util.List");
+        importMapping.put("ArrayList", "java.util.ArrayList");
+        importMapping.put("List", "java.util.*");
+        importMapping.put("Set", "java.util.*");
+        importMapping.put("DateTime", "org.joda.time.*");
+        importMapping.put("LocalDateTime", "org.joda.time.*");
+        importMapping.put("LocalDate", "org.joda.time.*");
+        importMapping.put("LocalTime", "org.joda.time.*");
+
+        cliOptions.add(CliOption.newBoolean(CodegenConstants.SORT_PARAMS_BY_REQUIRED_FLAG,
+                CodegenConstants.SORT_PARAMS_BY_REQUIRED_FLAG_DESC).defaultValue(Boolean.TRUE.toString()));
+        cliOptions.add(CliOption.newBoolean(CodegenConstants.ENSURE_UNIQUE_PARAMS, CodegenConstants
+                .ENSURE_UNIQUE_PARAMS_DESC).defaultValue(Boolean.TRUE.toString()));
+    }
+
+    /**
+     * Return the example path
+     *
+     * @param path the path of the operation
+     * @param operation Swagger operation object
+     * @return string presentation of the example path
+     */
+    @SuppressWarnings("static-method")
+    public String generateExamplePath(String path, Operation operation) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(path);
+
+        if (operation.getParameters() != null) {
+            int count = 0;
+
+            for (Parameter param : operation.getParameters()) {
+                if (param instanceof QueryParameter) {
+                    StringBuilder paramPart = new StringBuilder();
+                    QueryParameter qp = (QueryParameter) param;
+
+                    if (count == 0) {
+                        paramPart.append("?");
+                    } else {
+                        paramPart.append(",");
+                    }
+                    count += 1;
+                    if (!param.getRequired()) {
+                        paramPart.append("[");
+                    }
+                    paramPart.append(param.getName()).append("=");
+                    paramPart.append("{");
+                    if (qp.getCollectionFormat() != null) {
+                        paramPart.append(param.getName() + "1");
+                        if ("csv".equals(qp.getCollectionFormat())) {
+                            paramPart.append(",");
+                        } else if ("pipes".equals(qp.getCollectionFormat())) {
+                            paramPart.append("|");
+                        } else if ("tsv".equals(qp.getCollectionFormat())) {
+                            paramPart.append("\t");
+                        } else if ("multi".equals(qp.getCollectionFormat())) {
+                            paramPart.append("&").append(param.getName()).append("=");
+                            paramPart.append(param.getName() + "2");
+                        }
+                    } else {
+                        paramPart.append(param.getName());
+                    }
+                    paramPart.append("}");
+                    if (!param.getRequired()) {
+                        paramPart.append("]");
+                    }
+                    sb.append(paramPart.toString());
+                }
+            }
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Return the instantiation type of the property, especially for map and array
+     *
+     * @param p Swagger property object
+     * @return string presentation of the instantiation type of the property
+     */
+    public String toInstantiationType(Property p) {
+        if (p instanceof MapProperty) {
+            MapProperty ap = (MapProperty) p;
+            Property additionalProperties2 = ap.getAdditionalProperties();
+            String type = additionalProperties2.getType();
+            if (null == type) {
+                LOGGER.error("No Type defined for Additional Property " + additionalProperties2 + "\n" //
+                      + "\tIn Property: " + p);
+            }
+            String inner = getSwaggerType(additionalProperties2);
+            return instantiationTypes.get("map") + "<String, " + inner + ">";
+        } else if (p instanceof ArrayProperty) {
+            ArrayProperty ap = (ArrayProperty) p;
+            String inner = getSwaggerType(ap.getItems());
+            return instantiationTypes.get("array") + "<" + inner + ">";
+        } else {
+            return null;
+        }
+    }
+
+    /**
+     * Return the example value of the parameter. 
+     *
+     * @param p Swagger property object
+     */
+    public void setParameterExampleValue(CodegenParameter p) {
+
+    }
+
+    /**
+     * Return the example value of the property
+     *
+     * @param p Swagger property object
+     * @return string presentation of the example value of the property
+     */
+    public String toExampleValue(Property p) {
+        if(p.getExample() != null) {
+            return p.getExample().toString();
+        }
+        if (p instanceof StringProperty) {
+            return "null";
+        } else if (p instanceof BooleanProperty) {
+            return "null";
+        } else if (p instanceof DateProperty) {
+            return "null";
+        } else if (p instanceof DateTimeProperty) {
+            return "null";
+        } else if (p instanceof DoubleProperty) {
+            DoubleProperty dp = (DoubleProperty) p;
+            if (dp.getExample() != null) {
+                return dp.getExample().toString();
+            }
+            return "null";
+        } else if (p instanceof FloatProperty) {
+            FloatProperty dp = (FloatProperty) p;
+            if (dp.getExample() != null) {
+                return dp.getExample().toString();
+            }
+            return "null";
+        } else if (p instanceof IntegerProperty) {
+            IntegerProperty dp = (IntegerProperty) p;
+            if (dp.getExample() != null) {
+                return dp.getExample().toString();
+            }
+            return "null";
+        } else if (p instanceof LongProperty) {
+            LongProperty dp = (LongProperty) p;
+            if (dp.getExample() != null) {
+                return dp.getExample().toString();
+            }
+            return "null";
+        } else {
+            return "null";
+        }
+    }
+
+    /**
+     * Return the default value of the property
+     *
+     * @param p Swagger property object
+     * @return string presentation of the default value of the property
+     */
+    @SuppressWarnings("static-method")
+    public String toDefaultValue(Property p) {
+        if (p instanceof StringProperty) {
+            return "null";
+        } else if (p instanceof BooleanProperty) {
+            return "null";
+        } else if (p instanceof DateProperty) {
+            return "null";
+        } else if (p instanceof DateTimeProperty) {
+            return "null";
+        } else if (p instanceof DoubleProperty) {
+            DoubleProperty dp = (DoubleProperty) p;
+            if (dp.getDefault() != null) {
+                return dp.getDefault().toString();
+            }
+            return "null";
+        } else if (p instanceof FloatProperty) {
+            FloatProperty dp = (FloatProperty) p;
+            if (dp.getDefault() != null) {
+                return dp.getDefault().toString();
+            }
+            return "null";
+        } else if (p instanceof IntegerProperty) {
+            IntegerProperty dp = (IntegerProperty) p;
+            if (dp.getDefault() != null) {
+                return dp.getDefault().toString();
+            }
+            return "null";
+        } else if (p instanceof LongProperty) {
+            LongProperty dp = (LongProperty) p;
+            if (dp.getDefault() != null) {
+                return dp.getDefault().toString();
+            }
+            return "null";
+        } else {
+            return "null";
+        }
+    }
+
+    /**
+     * Return the property initialized from a data object
+     * Useful for initialization with a plain object in Javascript
+     *
+     * @param name Name of the property object
+     * @param p Swagger property object
+     * @return string presentation of the default value of the property
+     */
+    @SuppressWarnings("static-method")
+    public String toDefaultValueWithParam(String name, Property p) {
+        return " = data." + name + ";";
+    }
+
+    /**
+     * returns the swagger type for the property
+     * @param p Swagger property object
+     * @return string presentation of the type
+     **/
+    @SuppressWarnings("static-method")
+    public String getSwaggerType(Property p) {
+        String datatype = null;
+        if (p instanceof StringProperty && "number".equals(p.getFormat())) {
+            datatype = "BigDecimal";
+        } else if (p instanceof StringProperty) {
+            datatype = "string";
+        } else if (p instanceof ByteArrayProperty) {
+            datatype = "ByteArray";
+        } else if (p instanceof BinaryProperty) {
+            datatype = "binary";
+        } else if (p instanceof BooleanProperty) {
+            datatype = "boolean";
+        } else if (p instanceof DateProperty) {
+            datatype = "date";
+        } else if (p instanceof DateTimeProperty) {
+            datatype = "DateTime";
+        } else if (p instanceof DoubleProperty) {
+            datatype = "double";
+        } else if (p instanceof FloatProperty) {
+            datatype = "float";
+        } else if (p instanceof IntegerProperty) {
+            datatype = "integer";
+        } else if (p instanceof LongProperty) {
+            datatype = "long";
+        } else if (p instanceof MapProperty) {
+            datatype = "map";
+        } else if (p instanceof DecimalProperty) {
+            datatype = "number";
+        } else if ( p instanceof UUIDProperty) {
+            datatype = "UUID";
+        } else if (p instanceof RefProperty) {
+            try {
+                RefProperty r = (RefProperty) p;
+                datatype = r.get$ref();
+                if (datatype.indexOf("#/definitions/") == 0) {
+                    datatype = datatype.substring("#/definitions/".length());
+                }
+            } catch (Exception e) {
+                LOGGER.warn("Error obtaining the datatype from RefProperty:" + p + ". Datatype default to Object");
+                datatype = "Object";
+                LOGGER.error(e.getMessage(), e);
+            }
+        } else {
+            if (p != null) {
+                datatype = p.getType();
+            }
+        }
+        return datatype;
+    }
+
+    /**
+     * Return the snake-case of the string
+     *
+     * @param name string to be snake-cased
+     * @return snake-cased string
+     */
+    @SuppressWarnings("static-method")
+    public String snakeCase(String name) {
+        return (name.length() > 0) ? (Character.toLowerCase(name.charAt(0)) + name.substring(1)) : "";
+    }
+
+    /**
+     * Capitalize the string
+     *
+     * @param name string to be capitalized
+     * @return capitalized string
+     */
+    @SuppressWarnings("static-method")
+    public String initialCaps(String name) {
+        return StringUtils.capitalize(name);
+    }
+
+    /**
+     * Output the type declaration of a given name
+     *
+     * @param name name
+     * @return a string presentation of the type
+     */
+    @SuppressWarnings("static-method")
+    public String getTypeDeclaration(String name) {
+        return name;
+    }
+
+    /**
+     * Output the type declaration of the property
+     *
+     * @param p Swagger Property object
+     * @return a string presentation of the property type
+     */
+    public String getTypeDeclaration(Property p) {
+        String swaggerType = getSwaggerType(p);
+        if (typeMapping.containsKey(swaggerType)) {
+            return typeMapping.get(swaggerType);
+        }
+        return swaggerType;
+    }
+
+    /**
+     * Output the API (class) name (capitalized) ending with "Api"
+     * Return DefaultApi if name is empty
+     *
+     * @param name the name of the Api
+     * @return capitalized Api name ending with "Api"
+     */
+    public String toApiName(String name) {
+        if (name.length() == 0) {
+            return "DefaultApi";
+        }
+        return initialCaps(name) + "Api";
+    }
+
+    /**
+     * Output the proper model name (capitalized)
+     *
+     * @param name the name of the model
+     * @return capitalized model name
+     */
+    public String toModelName(final String name) {
+        return initialCaps(modelNamePrefix + name + modelNameSuffix);
+    }
+
+    /**
+     * Convert Swagger Model object to Codegen Model object without providing all model definitions
+     *
+     * @param name the name of the model
+     * @param model Swagger Model object
+     * @return Codegen Model object
+     */
+    public CodegenModel fromModel(String name, Model model) {
+        return fromModel(name, model, null);
+    }
+
+    /**
+     * Convert Swagger Model object to Codegen Model object
+     *
+     * @param name the name of the model
+     * @param model Swagger Model object
+     * @param allDefinitions a map of all Swagger models from the spec
+     * @return Codegen Model object
+     */
+    public CodegenModel fromModel(String name, Model model, Map<String, Model> allDefinitions) {
+        CodegenModel m = CodegenModelFactory.newInstance(CodegenModelType.MODEL);
+        if (reservedWords.contains(name)) {
+            m.name = escapeReservedWord(name);
+        } else {
+            m.name = name;
+        }
+        m.description = escapeText(model.getDescription());
+        m.unescapedDescription = model.getDescription();
+        m.classname = toModelName(name);
+        m.classVarName = toVarName(name);
+        m.classFilename = toModelFilename(name);
+        m.modelJson = Json.pretty(model);
+        m.externalDocs = model.getExternalDocs();
+        m.vendorExtensions = model.getVendorExtensions();
+
+        if (model instanceof ModelImpl) {
+            m.discriminator = ((ModelImpl) model).getDiscriminator();
+        }
+
+
+        if (model instanceof ArrayModel) {
+            ArrayModel am = (ArrayModel) model;
+            ArrayProperty arrayProperty = new ArrayProperty(am.getItems());
+            m.hasEnums = false; // Otherwise there will be a NullPointerException in JavaClientCodegen.fromModel
+            addParentContainer(m, name, arrayProperty);
+        } else if (model instanceof RefModel) {
+            // TODO
+        } else if (model instanceof ComposedModel) {
+            final ComposedModel composed = (ComposedModel) model;
+            Map<String, Property> properties = new LinkedHashMap<String, Property>();
+            List<String> required = new ArrayList<String>();
+            Map<String, Property> allProperties;
+            List<String> allRequired;
+            if (supportsInheritance) {
+                allProperties = new LinkedHashMap<String, Property>();
+                allRequired = new ArrayList<String>();
+                m.allVars = new ArrayList<CodegenProperty>();
+            } else {
+                allProperties = null;
+                allRequired = null;
+            }
+            // parent model
+            final RefModel parent = (RefModel) composed.getParent();
+            if (parent != null) {
+                final String parentRef = parent.getSimpleRef();
+                m.parentSchema = parentRef;
+                m.parent = toModelName(parent.getSimpleRef());
+                addImport(m, m.parent);
+                if (allDefinitions != null) {
+                    final Model parentModel = allDefinitions.get(m.parentSchema);
+                    if (supportsInheritance) {
+                        addProperties(allProperties, allRequired, parentModel, allDefinitions);
+                    } else {
+                        addProperties(properties, required, parentModel, allDefinitions);
+                    }
+                }
+            }
+            // interfaces (intermediate models)
+            if (composed.getInterfaces() != null) {
+                if (m.interfaces == null)
+                    m.interfaces = new ArrayList<String>();
+                for (RefModel _interface : composed.getInterfaces()) {
+                    final String interfaceRef = toModelName(_interface.getSimpleRef());
+                    m.interfaces.add(interfaceRef);
+                    addImport(m, interfaceRef);
+                    if (allDefinitions != null) {
+                        final Model interfaceModel = allDefinitions.get(interfaceRef);
+                        if (supportsInheritance) {
+                            addProperties(allProperties, allRequired, interfaceModel, allDefinitions);
+                        } else {
+                            addProperties(properties, required, interfaceModel, allDefinitions);
+                        }
+                    }
+                }
+            }
+            // child model (properties owned by the model itself)
+            Model child = composed.getChild();
+            if (child != null && child instanceof RefModel && allDefinitions != null) {
+                final String childRef = ((RefModel) child).getSimpleRef();
+                child = allDefinitions.get(childRef);
+            }
+            if (child != null && child instanceof ModelImpl) {
+                addProperties(properties, required, child, allDefinitions);
+                if (supportsInheritance) {
+                    addProperties(allProperties, allRequired, child, allDefinitions);
+                }
+            }
+            addVars(m, properties, required, allProperties, allRequired);
+        } else {
+            ModelImpl impl = (ModelImpl) model;
+            if(impl.getEnum() != null && impl.getEnum().size() > 0) {
+                m.isEnum = true;
+                m.allowableValues = impl.getEnum();
+                Property p = PropertyBuilder.build(impl.getType(), impl.getFormat(), null);
+                m.dataType = getSwaggerType(p);
+            }
+            if (impl.getAdditionalProperties() != null) {
+                MapProperty mapProperty = new MapProperty(impl.getAdditionalProperties());
+                addParentContainer(m, name, mapProperty);
+            }
+            addVars(m, impl.getProperties(), impl.getRequired());
+        }
+
+        if (m.vars != null) {
+            for(CodegenProperty prop : m.vars) {
+                postProcessModelProperty(m, prop);
+            }
+        }
+        return m;
+    }
+
+    protected void addProperties(Map<String, Property> properties, List<String> required, Model model,
+            Map<String, Model> allDefinitions) {
+
+        if (model instanceof ModelImpl) {
+            ModelImpl mi = (ModelImpl) model;
+            if (mi.getProperties() != null) {
+                properties.putAll(mi.getProperties());
+            }
+            if (mi.getRequired() != null) {
+                required.addAll(mi.getRequired());
+            }
+        } else if (model instanceof RefModel) {
+            String interfaceRef = toModelName(((RefModel) model).getSimpleRef());
+            Model interfaceModel = allDefinitions.get(interfaceRef);
+            addProperties(properties, required, interfaceModel, allDefinitions);
+        } else if (model instanceof ComposedModel) {
+            for (Model component :((ComposedModel) model).getAllOf()) {
+                addProperties(properties, required, component, allDefinitions);
+            }
+        }
+    }
+
+    /**
+     * Camelize the method name of the getter and setter
+     *
+     * @param name string to be camelized
+     * @return Camelized string
+     */
+    public String getterAndSetterCapitalize(String name) {
+        if (name == null || name.length() == 0) {
+            return name;
+        }
+
+        return camelize(toVarName(name));
+
+    }
+
+    /**
+     * Convert Swagger Property object to Codegen Property object
+     *
+     * @param name name of the property
+     * @param p Swagger property object
+     * @return Codegen Property object
+     */
+    public CodegenProperty fromProperty(String name, Property p) {
+        if (p == null) {
+            LOGGER.error("unexpected missing property for name " + name);
+            return null;
+        }
+
+        CodegenProperty property = CodegenModelFactory.newInstance(CodegenModelType.PROPERTY);
+
+        property.name = toVarName(name);
+        property.baseName = name;
+        property.description = escapeText(p.getDescription());
+        property.unescapedDescription = p.getDescription();
+        property.getter = "get" + getterAndSetterCapitalize(name);
+        property.setter = "set" + getterAndSetterCapitalize(name);
+        property.example = toExampleValue(p);
+        property.defaultValue = toDefaultValue(p);
+        property.defaultValueWithParam = toDefaultValueWithParam(name, p);
+        property.jsonSchema = Json.pretty(p);
+        property.isReadOnly = p.getReadOnly();
+        property.vendorExtensions = p.getVendorExtensions();
+
+        String type = getSwaggerType(p);
+        if (p instanceof AbstractNumericProperty) {
+            AbstractNumericProperty np = (AbstractNumericProperty) p;
+            property.minimum = np.getMinimum();
+            property.maximum = np.getMaximum();
+            property.exclusiveMinimum = np.getExclusiveMinimum();
+            property.exclusiveMaximum = np.getExclusiveMaximum();
+
+            // legacy support
+            Map<String, Object> allowableValues = new HashMap<String, Object>();
+            if (np.getMinimum() != null) {
+                allowableValues.put("min", np.getMinimum());
+            }
+            if (np.getMaximum() != null) {
+                allowableValues.put("max", np.getMaximum());
+            }
+            if(allowableValues.size() > 0) {
+              property.allowableValues = allowableValues;
+            }
+        }
+
+        if (p instanceof StringProperty) {
+            StringProperty sp = (StringProperty) p;
+            property.maxLength = sp.getMaxLength();
+            property.minLength = sp.getMinLength();
+            property.pattern = sp.getPattern();
+            property.isString = true;
+            if (sp.getEnum() != null) {
+                List<String> _enum = sp.getEnum();
+                property._enum = _enum;
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }
+        }
+
+        if (p instanceof BaseIntegerProperty) {
+            BaseIntegerProperty sp = (BaseIntegerProperty) p;
+            property.isInteger = true;
+            /*if (sp.getEnum() != null) {
+                List<Integer> _enum = sp.getEnum();
+                property._enum = new ArrayList<String>();
+                for(Integer i : _enum) {
+                  property._enum.add(i.toString());
+                }
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }*/
+        }
+
+        if (p instanceof IntegerProperty) {
+            IntegerProperty sp = (IntegerProperty) p;
+            property.isInteger = true;
+            if (sp.getEnum() != null) {
+                List<Integer> _enum = sp.getEnum();
+                property._enum = new ArrayList<String>();
+                for(Integer i : _enum) {
+                  property._enum.add(i.toString());
+                }
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }
+        }
+
+        if (p instanceof LongProperty) {
+            LongProperty sp = (LongProperty) p;
+            property.isLong = true;
+            if (sp.getEnum() != null) {
+                List<Long> _enum = sp.getEnum();
+                property._enum = new ArrayList<String>();
+                for(Long i : _enum) {
+                  property._enum.add(i.toString());
+                }
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }
+        }
+
+        if (p instanceof BooleanProperty) {
+            property.isBoolean = true;
+        }
+
+        if (p instanceof BinaryProperty) {
+            property.isBinary = true;
+        }
+
+        if (p instanceof ByteArrayProperty) {
+            property.isByteArray = true;
+        }
+
+        if (p instanceof DecimalProperty) {
+            DecimalProperty sp = (DecimalProperty) p;
+            property.isFloat = true;
+            /*if (sp.getEnum() != null) {
+                List<Double> _enum = sp.getEnum();
+                property._enum = new ArrayList<String>();
+                for(Double i : _enum) {
+                  property._enum.add(i.toString());
+                }
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }*/
+        }
+
+        if (p instanceof DoubleProperty) {
+            DoubleProperty sp = (DoubleProperty) p;
+            property.isDouble = true;
+            if (sp.getEnum() != null) {
+                List<Double> _enum = sp.getEnum();
+                property._enum = new ArrayList<String>();
+                for(Double i : _enum) {
+                  property._enum.add(i.toString());
+                }
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }
+        }
+
+        if (p instanceof FloatProperty) {
+            FloatProperty sp = (FloatProperty) p;
+            property.isFloat = true;
+            if (sp.getEnum() != null) {
+                List<Float> _enum = sp.getEnum();
+                property._enum = new ArrayList<String>();
+                for(Float i : _enum) {
+                  property._enum.add(i.toString());
+                }
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }
+        }
+
+        if (p instanceof DateProperty) {
+            DateProperty sp = (DateProperty) p;
+            property.isDate = true;
+            if (sp.getEnum() != null) {
+                List<String> _enum = sp.getEnum();
+                property._enum = new ArrayList<String>();
+                for(String i : _enum) {
+                  property._enum.add(i.toString());
+                }
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }
+        }
+
+        if (p instanceof DateTimeProperty) {
+            DateTimeProperty sp = (DateTimeProperty) p;
+            property.isDateTime = true;
+            if (sp.getEnum() != null) {
+                List<String> _enum = sp.getEnum();
+                property._enum = new ArrayList<String>();
+                for(String i : _enum) {
+                  property._enum.add(i.toString());
+                }
+                property.isEnum = true;
+
+                // legacy support
+                Map<String, Object> allowableValues = new HashMap<String, Object>();
+                allowableValues.put("values", _enum);
+                property.allowableValues = allowableValues;
+            }
+        }
+        property.datatype = getTypeDeclaration(p);
+
+        // this can cause issues for clients which don't support enums
+        if (property.isEnum) {
+            property.datatypeWithEnum = toEnumName(property);
+        } else {
+            property.datatypeWithEnum = property.datatype;
+        }
+
+        property.baseType = getSwaggerType(p);
+
+      	if (p instanceof ArrayProperty) {
+        		property.isContainer = true;
+        		property.isListContainer = true;
+        		property.containerType = "array";
+        		ArrayProperty ap = (ArrayProperty) p;
+        		CodegenProperty cp = fromProperty(property.name, ap.getItems());
+        		if (cp == null) {
+        			LOGGER.warn("skipping invalid property " + Json.pretty(p));
+        		} else {
+          			property.baseType = getSwaggerType(p);
+          			if (!languageSpecificPrimitives.contains(cp.baseType)) {
+          				  property.complexType = cp.baseType;
+          			} else {
+          				  property.isPrimitiveType = true;
+          			}
+          			property.items = cp;
+          			if (property.items.isEnum) {
+          				  property.datatypeWithEnum = property.datatypeWithEnum.replace(property.items.baseType,
+          						property.items.datatypeWithEnum);
+                            if(property.defaultValue != null)
+          				        property.defaultValue = property.defaultValue.replace(property.items.baseType, property.items.datatypeWithEnum);
+          			}
+        		}
+      	} else if (p instanceof MapProperty) {
+            property.isContainer = true;
+            property.isMapContainer = true;
+            property.containerType = "map";
+            MapProperty ap = (MapProperty) p;
+            CodegenProperty cp = fromProperty("inner", ap.getAdditionalProperties());
+            property.items = cp;
+
+            property.baseType = getSwaggerType(p);
+            if (!languageSpecificPrimitives.contains(cp.baseType)) {
+                property.complexType = cp.baseType;
+            } else {
+                property.isPrimitiveType = true;
+            }
+        } else {
+            setNonArrayMapProperty(property, type);
+        }
+        return property;
+    }
+
+    protected void setNonArrayMapProperty(CodegenProperty property, String type) {
+        property.isNotContainer = true;
+        if (languageSpecificPrimitives().contains(type)) {
+            property.isPrimitiveType = true;
+        } else {
+            property.complexType = property.baseType;
+        }
+    }
+
+    /**
+     * Override with any special handling of response codes
+     * @param responses Swagger Operation's responses
+     * @return default method response or <tt>null</tt> if not found
+     */
+    protected Response findMethodResponse(Map<String, Response> responses) {
+
+        String code = null;
+        for (String responseCode : responses.keySet()) {
+            if (responseCode.startsWith("2") || responseCode.equals("default")) {
+                if (code == null || code.compareTo(responseCode) > 0) {
+                    code = responseCode;
+                }
+            }
+        }
+        if (code == null) {
+            return null;
+        }
+        return responses.get(code);
+    }
+
+    /**
+     * Convert Swagger Operation object to Codegen Operation object (without providing a Swagger object)
+     *
+     * @param path the path of the operation
+     * @param httpMethod HTTP method
+     * @param operation Swagger operation object
+     * @param definitions a map of Swagger models
+     * @return Codegen Operation object
+     */
+    public CodegenOperation fromOperation(String path, String httpMethod, Operation operation, Map<String, Model> definitions) {
+    	return fromOperation(path, httpMethod, operation, definitions, null);
+    }
+
+    /**
+     * Convert Swagger Operation object to Codegen Operation object
+     *
+     * @param path the path of the operation
+     * @param httpMethod HTTP method
+     * @param operation Swagger operation object
+     * @param definitions a map of Swagger models
+     * @param swagger a Swagger object representing the spec
+     * @return Codegen Operation object
+     */
+    public CodegenOperation fromOperation(String path, String httpMethod, Operation operation, Map<String, Model> definitions, Swagger swagger) {
+        CodegenOperation op = CodegenModelFactory.newInstance(CodegenModelType.OPERATION);
+        Set<String> imports = new HashSet<String>();
+        op.vendorExtensions = operation.getVendorExtensions();
+
+        String operationId = getOrGenerateOperationId(operation, path, httpMethod);
+        operationId = removeNonNameElementToCamelCase(operationId);
+        op.path = path;
+        op.operationId = toOperationId(operationId);
+        op.summary = escapeText(operation.getSummary());
+        op.notes = escapeText(operation.getDescription());
+        op.tags = operation.getTags();
+        op.hasConsumes = false;
+        op.hasProduces = false;
+
+        List<String> consumes = new ArrayList<String>();
+        if (operation.getConsumes() != null) {
+            if (operation.getConsumes().size() > 0) {
+                // use consumes defined in the operation
+                consumes = operation.getConsumes();
+            } else {
+                // empty list, do nothing to override global setting
+            }
+        } else if (swagger != null && swagger.getConsumes() != null && swagger.getConsumes().size() > 0) {
+            // use consumes defined globally
+            consumes = swagger.getConsumes();
+            LOGGER.debug("No consumes defined in operation. Using global consumes (" + swagger.getConsumes() + ") for " + op.operationId);
+        }
+
+        // if "consumes" is defined (per operation or using global definition)
+        if (consumes != null && consumes.size() > 0) {
+            List<Map<String, String>> c = new ArrayList<Map<String, String>>();
+            int count = 0;
+            for (String key : consumes) {
+                Map<String, String> mediaType = new HashMap<String, String>();
+                mediaType.put("mediaType", key);
+                count += 1;
+                if (count < consumes.size()) {
+                    mediaType.put("hasMore", "true");
+                } else {
+                    mediaType.put("hasMore", null);
+                }
+                c.add(mediaType);
+            }
+            op.consumes = c;
+            op.hasConsumes = true;
+        }
+
+        List<String> produces = new ArrayList<String>();
+        if (operation.getProduces() != null) {
+            if (operation.getProduces().size() > 0) {
+                // use produces defined in the operation
+                produces = operation.getProduces();
+            } else {
+                // empty list, do nothing to override global setting
+            }
+        } else if (swagger != null && swagger.getProduces() != null && swagger.getProduces().size() > 0) {
+            // use produces defined globally
+            produces = swagger.getProduces();
+            LOGGER.debug("No produces defined in operation. Using global produces (" + swagger.getProduces() + ") for " + op.operationId);
+        }
+
+        // if "produces" is defined (per operation or using global definition)
+        if (produces != null && produces.size() > 0) {
+            List<Map<String, String>> c = new ArrayList<Map<String, String>>();
+            int count = 0;
+            for (String key : produces) {
+                Map<String, String> mediaType = new HashMap<String, String>();
+                mediaType.put("mediaType", key);
+                count += 1;
+                if (count < produces.size()) {
+                    mediaType.put("hasMore", "true");
+                } else {
+                    mediaType.put("hasMore", null);
+                }
+                c.add(mediaType);
+            }
+            op.produces = c;
+            op.hasProduces = true;
+        }
+
+        if (operation.getResponses() != null && !operation.getResponses().isEmpty()) {
+            Response methodResponse = findMethodResponse(operation.getResponses());
+
+            for (Map.Entry<String, Response> entry : operation.getResponses().entrySet()) {
+                Response response = entry.getValue();
+                CodegenResponse r = fromResponse(entry.getKey(), response);
+                r.hasMore = true;
+                if (r.baseType != null &&
+                        !defaultIncludes.contains(r.baseType) &&
+                        !languageSpecificPrimitives.contains(r.baseType)) {
+                    imports.add(r.baseType);
+                }
+                r.isDefault = response == methodResponse;
+                op.responses.add(r);
+                if (r.isBinary && r.isDefault){
+                    op.isResponseBinary = Boolean.TRUE;
+                }
+            }
+            op.responses.get(op.responses.size() - 1).hasMore = false;
+
+            if (methodResponse != null) {
+                if (methodResponse.getSchema() != null) {
+                    CodegenProperty cm = fromProperty("response", methodResponse.getSchema());
+
+                    Property responseProperty = methodResponse.getSchema();
+
+                    if (responseProperty instanceof ArrayProperty) {
+                        ArrayProperty ap = (ArrayProperty) responseProperty;
+                        CodegenProperty innerProperty = fromProperty("response", ap.getItems());
+                        op.returnBaseType = innerProperty.baseType;
+                    } else {
+                        if (cm.complexType != null) {
+                            op.returnBaseType = cm.complexType;
+                        } else {
+                            op.returnBaseType = cm.baseType;
+                        }
+                    }
+                    op.examples = new ExampleGenerator(definitions).generate(methodResponse.getExamples(), operation.getProduces(), responseProperty);
+                    op.defaultResponse = toDefaultValue(responseProperty);
+                    op.returnType = cm.datatype;
+                    op.hasReference = definitions != null && definitions.containsKey(op.returnBaseType);
+
+                    // lookup discriminator
+                    if (definitions != null) {
+                        Model m = definitions.get(op.returnBaseType);
+                        if (m != null) {
+                            CodegenModel cmod = fromModel(op.returnBaseType, m, definitions);
+                            op.discriminator = cmod.discriminator;
+                        }
+                    }
+
+                    if (cm.isContainer != null) {
+                        op.returnContainer = cm.containerType;
+                        if ("map".equals(cm.containerType)) {
+                            op.isMapContainer = Boolean.TRUE;
+                        } else if ("list".equalsIgnoreCase(cm.containerType)) {
+                            op.isListContainer = Boolean.TRUE;
+                        } else if ("array".equalsIgnoreCase(cm.containerType)) {
+                            op.isListContainer = Boolean.TRUE;
+                        }
+                    } else {
+                        op.returnSimpleType = true;
+                    }
+                    if (languageSpecificPrimitives().contains(op.returnBaseType) || op.returnBaseType == null) {
+                        op.returnTypeIsPrimitive = true;
+                    }
+                }
+                addHeaders(methodResponse, op.responseHeaders);
+            }
+        }
+
+        List<Parameter> parameters = operation.getParameters();
+        CodegenParameter bodyParam = null;
+        List<CodegenParameter> allParams = new ArrayList<CodegenParameter>();
+        List<CodegenParameter> bodyParams = new ArrayList<CodegenParameter>();
+        List<CodegenParameter> pathParams = new ArrayList<CodegenParameter>();
+        List<CodegenParameter> queryParams = new ArrayList<CodegenParameter>();
+        List<CodegenParameter> headerParams = new ArrayList<CodegenParameter>();
+        List<CodegenParameter> cookieParams = new ArrayList<CodegenParameter>();
+        List<CodegenParameter> formParams = new ArrayList<CodegenParameter>();
+
+        if (parameters != null) {
+            for (Parameter param : parameters) {
+                CodegenParameter p = fromParameter(param, imports);
+                // rename parameters to make sure all of them have unique names
+                if (ensureUniqueParams) {
+                    while (true) {
+                        boolean exists = false;
+                        for (CodegenParameter cp : allParams) {
+                            if (p.paramName.equals(cp.paramName)) {
+                                exists = true;
+                                break;
+                            }
+                        }
+                        if (exists) {
+                            p.paramName = generateNextName(p.paramName);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                // set isPrimitiveType and baseType for allParams
+                /*if (languageSpecificPrimitives.contains(p.baseType)) {
+                    p.isPrimitiveType = true;
+                    p.baseType = getSwaggerType(p);
+                }*/
+
+
+                allParams.add(p);
+                // Issue #2561 (neilotoole) : Moved setting of is<Type>Param flags
+                // from here to fromParameter().
+                if (param instanceof QueryParameter) {
+                    queryParams.add(p.copy());
+                } else if (param instanceof PathParameter) {
+                    pathParams.add(p.copy());
+                } else if (param instanceof HeaderParameter) {
+                    headerParams.add(p.copy());
+                } else if (param instanceof CookieParameter) {
+                    cookieParams.add(p.copy());
+                } else if (param instanceof BodyParameter) {
+                    bodyParam = p;
+                    bodyParams.add(p.copy());
+                } else if (param instanceof FormParameter) {
+                    formParams.add(p.copy());
+                }
+                if (p.required == null || !p.required) {
+                    op.hasOptionalParams = true;
+                }
+            }
+        }
+        for (String i : imports) {
+            if (needToImport(i)) {
+                op.imports.add(i);
+            }
+        }
+        op.bodyParam = bodyParam;
+        op.httpMethod = httpMethod.toUpperCase();
+
+        // move "required" parameters in front of "optional" parameters
+        if (sortParamsByRequiredFlag) {
+          Collections.sort(allParams, new Comparator<CodegenParameter>() {
+              @Override
+              public int compare(CodegenParameter one, CodegenParameter another) {
+                  boolean oneRequired = one.required == null ? false : one.required;
+                  boolean anotherRequired = another.required == null ? false : another.required;
+                  if (oneRequired == anotherRequired) return 0;
+                  else if (oneRequired) return -1;
+                  else return 1;
+              }
+          });
+        }
+        op.allParams = addHasMore(allParams);
+        op.bodyParams = addHasMore(bodyParams);
+        op.pathParams = addHasMore(pathParams);
+        op.queryParams = addHasMore(queryParams);
+        op.headerParams = addHasMore(headerParams);
+        // op.cookieParams = cookieParams;
+        op.formParams = addHasMore(formParams);
+        // legacy support
+        op.nickname = op.operationId;
+
+        if (op.allParams.size() > 0) {
+            op.hasParams = true;
+        }
+        op.externalDocs = operation.getExternalDocs();
+
+        return op;
+    }
+
+    /**
+     * Convert Swagger Response object to Codegen Response object
+     *
+     * @param responseCode HTTP response code
+     * @param response Swagger Response object
+     * @return Codegen Response object
+     */
+    public CodegenResponse fromResponse(String responseCode, Response response) {
+        CodegenResponse r = CodegenModelFactory.newInstance(CodegenModelType.RESPONSE);
+        if ("default".equals(responseCode)) {
+            r.code = "0";
+        } else {
+            r.code = responseCode;
+        }
+        r.message = escapeText(response.getDescription());
+        r.schema = response.getSchema();
+        r.examples = toExamples(response.getExamples());
+        r.jsonSchema = Json.pretty(response);
+        addHeaders(response, r.headers);
+
+        if (r.schema != null) {
+            Property responseProperty = response.getSchema();
+            responseProperty.setRequired(true);
+            CodegenProperty cm = fromProperty("response", responseProperty);
+
+            if (responseProperty instanceof ArrayProperty) {
+                ArrayProperty ap = (ArrayProperty) responseProperty;
+                CodegenProperty innerProperty = fromProperty("response", ap.getItems());
+                r.baseType = innerProperty.baseType;
+            } else {
+                if (cm.complexType != null) {
+                    r.baseType = cm.complexType;
+                } else {
+                    r.baseType = cm.baseType;
+                }
+            }
+            r.dataType = cm.datatype;
+            r.isBinary = cm.datatype.toLowerCase().startsWith("byte");
+            if (cm.isContainer != null) {
+                r.simpleType = false;
+                r.containerType = cm.containerType;
+                r.isMapContainer = "map".equals(cm.containerType);
+                r.isListContainer = "list".equals(cm.containerType);
+            } else {
+                r.simpleType = true;
+            }
+            r.primitiveType = (r.baseType == null || languageSpecificPrimitives().contains(r.baseType));
+        }
+        if (r.baseType == null) {
+            r.isMapContainer = false;
+            r.isListContainer = false;
+            r.primitiveType = true;
+            r.simpleType = true;
+        }
+        return r;
+    }
+
+    /**
+     * Convert Swagger Parameter object to Codegen Parameter object
+     *
+     * @param param Swagger parameter object
+     * @param imports set of imports for library/package/module
+     * @return Codegen Parameter object
+     */
+    public CodegenParameter fromParameter(Parameter param, Set<String> imports) {
+        CodegenParameter p = CodegenModelFactory.newInstance(CodegenModelType.PARAMETER);
+        p.baseName = param.getName();
+        p.description = escapeText(param.getDescription());
+        p.unescapedDescription = param.getDescription();
+        if (param.getRequired()) {
+            p.required = param.getRequired();
+        }
+        p.jsonSchema = Json.pretty(param);
+
+        if (System.getProperty("debugParser") != null) {
+            LOGGER.info("working on Parameter " + param);
+        }
+
+        // move the defaultValue for headers, forms and params
+        if (param instanceof QueryParameter) {
+            p.defaultValue = ((QueryParameter) param).getDefaultValue();
+        } else if (param instanceof HeaderParameter) {
+            p.defaultValue = ((HeaderParameter) param).getDefaultValue();
+        } else if (param instanceof FormParameter) {
+            p.defaultValue = ((FormParameter) param).getDefaultValue();
+        }
+
+        p.vendorExtensions = param.getVendorExtensions();
+
+        if (param instanceof SerializableParameter) {
+            SerializableParameter qp = (SerializableParameter) param;
+            Property property = null;
+            String collectionFormat = null;
+            String type = qp.getType();
+            if (null == type) {
+                LOGGER.warn("Type is NULL for Serializable Parameter: " + param);
+            }
+            if ("array".equals(type)) { // for array parameter
+                Property inner = qp.getItems();
+                if (inner == null) {
+                    LOGGER.warn("warning!  No inner type supplied for array parameter \"" + qp.getName() + "\", using String");
+                    inner = new StringProperty().description("//TODO automatically added by swagger-codegen");
+                }
+                property = new ArrayProperty(inner);
+                collectionFormat = qp.getCollectionFormat();
+                if (collectionFormat == null) {
+                    collectionFormat = "csv";
+                }
+                CodegenProperty pr = fromProperty("inner", inner);
+                p.baseType = pr.datatype;
+                p.isContainer = true;
+                p.isListContainer = true;
+                imports.add(pr.baseType);
+            } else if ("object".equals(type)) { // for map parameter
+                Property inner = qp.getItems();
+                if (inner == null) {
+                    LOGGER.warn("warning!  No inner type supplied for map parameter \"" + qp.getName() + "\", using String");
+                    inner = new StringProperty().description("//TODO automatically added by swagger-codegen");
+                }
+                property = new MapProperty(inner);
+                collectionFormat = qp.getCollectionFormat();
+                CodegenProperty pr = fromProperty("inner", inner);
+                p.baseType = pr.datatype;
+                p.isContainer = true;
+                p.isMapContainer = true;
+                imports.add(pr.baseType);
+            } else {
+                Map<PropertyId, Object> args = new HashMap<PropertyId, Object>();
+                String format = qp.getFormat();
+                args.put(PropertyId.ENUM, qp.getEnum());
+                property = PropertyBuilder.build(type, format, args);
+            }
+
+            if (property == null) {
+                LOGGER.warn("warning!  Property type \"" + type + "\" not found for parameter \"" + param.getName() + "\", using String");
+                property = new StringProperty().description("//TODO automatically added by swagger-codegen.  Type was " + type + " but not supported");
+            }
+            property.setRequired(param.getRequired());
+            CodegenProperty model = fromProperty(qp.getName(), property);
+
+            // set boolean flag (e.g. isString)
+            setParameterBooleanFlagWithCodegenProperty(p, model);
+
+            p.dataType = model.datatype;
+            if(model.isEnum) {
+                p.datatypeWithEnum = model.datatypeWithEnum;
+            }
+            p.isEnum = model.isEnum;
+            p._enum = model._enum;
+            p.allowableValues = model.allowableValues;
+            if(model.items != null && model.items.isEnum) {
+                p.datatypeWithEnum = model.datatypeWithEnum;
+                p.items = model.items;
+            }
+            p.collectionFormat = collectionFormat;
+            if(collectionFormat != null && collectionFormat.equals("multi")) {
+                p.isCollectionFormatMulti = true;
+            }
+            p.paramName = toParamName(qp.getName());
+
+            if (model.complexType != null) {
+                imports.add(model.complexType);
+            }
+            p.maxLength = qp.getMaxLength();
+            p.minLength = qp.getMinLength();
+            p.pattern = qp.getPattern();
+
+            p.maximum = qp.getMaximum();
+            p.exclusiveMaximum = qp.isExclusiveMaximum();
+            p.minimum = qp.getMinimum();
+            p.exclusiveMinimum = qp.isExclusiveMinimum();
+            p.maxLength = qp.getMaxLength();
+            p.minLength = qp.getMinLength();
+            p.pattern = qp.getPattern();
+            p.maxItems = qp.getMaxItems();
+            p.minItems = qp.getMinItems();
+            p.uniqueItems = qp.isUniqueItems();
+            p.multipleOf = qp.getMultipleOf();
+        } else {
+            if (!(param instanceof BodyParameter)) {
+                LOGGER.error("Cannot use Parameter " + param + " as Body Parameter");
+            }
+
+            BodyParameter bp = (BodyParameter) param;
+            Model model = bp.getSchema();
+
+            if (model instanceof ModelImpl) {
+                ModelImpl impl = (ModelImpl) model;
+                CodegenModel cm = fromModel(bp.getName(), impl);
+                if (cm.emptyVars != null && cm.emptyVars == false) {
+                    p.dataType = getTypeDeclaration(cm.classname);
+                    imports.add(p.dataType);
+                } else {
+                    Property prop = PropertyBuilder.build(impl.getType(), impl.getFormat(), null);
+                    prop.setRequired(bp.getRequired());
+                    CodegenProperty cp = fromProperty("property", prop);
+                    if (cp != null) {
+                        p.baseType = cp.baseType;
+                        p.dataType = cp.datatype;
+                        p.isPrimitiveType = cp.isPrimitiveType;
+                        p.isBinary = cp.datatype.toLowerCase().startsWith("byte");
+                    }
+
+                    // set boolean flag (e.g. isString)
+                    setParameterBooleanFlagWithCodegenProperty(p, cp);
+                }
+            } else if (model instanceof ArrayModel) {
+                // to use the built-in model parsing, we unwrap the ArrayModel
+                // and get a single property from it
+                ArrayModel impl = (ArrayModel) model;
+                // get the single property
+                ArrayProperty ap = new ArrayProperty().items(impl.getItems());
+                ap.setRequired(param.getRequired());
+                CodegenProperty cp = fromProperty("inner", ap);
+                if (cp.complexType != null) {
+                    imports.add(cp.complexType);
+                }
+                imports.add(cp.baseType);
+                p.dataType = cp.datatype;
+                p.baseType = cp.complexType;
+                p.isPrimitiveType = cp.isPrimitiveType;
+                p.isContainer = true;
+                p.isListContainer = true;
+
+                // set boolean flag (e.g. isString)
+                setParameterBooleanFlagWithCodegenProperty(p, cp);
+            } else {
+                Model sub = bp.getSchema();
+                if (sub instanceof RefModel) {
+                    String name = ((RefModel) sub).getSimpleRef();
+                    if (typeMapping.containsKey(name)) {
+                        name = typeMapping.get(name);
+                    } else {
+                        name = toModelName(name);
+                        if (defaultIncludes.contains(name)) {
+                            imports.add(name);
+                        }
+                        imports.add(name);
+                        name = getTypeDeclaration(name);
+                    }
+                    p.dataType = name;
+                    p.baseType = name;
+                }
+            }
+            p.paramName = toParamName(bp.getName());
+        }
+
+        // set the example value
+        // if not specified in x-example, generate a default value
+        if (p.vendorExtensions.containsKey("x-example")) {
+            p.example = (String) p.vendorExtensions.get("x-example");
+        } else if (Boolean.TRUE.equals(p.isString)) {
+            p.example = p.paramName + "_example";
+        } else if (Boolean.TRUE.equals(p.isBoolean)) {
+            p.example = new String("true");
+        } else if (Boolean.TRUE.equals(p.isLong)) {
+            p.example = new String("789");
+        } else if (Boolean.TRUE.equals(p.isInteger)) {
+            p.example = new String("56");
+        } else if (Boolean.TRUE.equals(p.isFloat)) {
+            p.example = new String("3.4");
+        } else if (Boolean.TRUE.equals(p.isDouble)) {
+            p.example = new String("1.2");
+        } else if (Boolean.TRUE.equals(p.isBinary)) {
+            p.example = new String("BINARY_DATA_HERE");
+        } else if (Boolean.TRUE.equals(p.isByteArray)) {
+            p.example = new String("B");
+        } else if (Boolean.TRUE.equals(p.isDate)) {
+            p.example = new String("2013-10-20");
+        } else if (Boolean.TRUE.equals(p.isDateTime)) {
+            p.example = new String("2013-10-20T19:20:30+01:00");
+        } else if (param instanceof FormParameter &&
+                ("file".equalsIgnoreCase(((FormParameter) param).getType()) ||
+                "file".equals(p.baseType))) {
+            p.isFile = true;
+            p.example = new String("/path/to/file.txt");
+        }
+
+        // set the parameter excample value
+        // should be overridden by lang codegen
+        setParameterExampleValue(p);
+
+        // Issue #2561 (neilotoole) : Set the is<TYPE>Param flags.
+        // This code has been moved to here from #fromOperation
+        // because these values should be set before calling #postProcessParameter.
+        // See: https://github.com/swagger-api/swagger-codegen/issues/2561
+        if (param instanceof QueryParameter) {
+            p.isQueryParam = true;
+        } else if (param instanceof PathParameter) {
+            p.required = true;
+            p.isPathParam = true;
+        } else if (param instanceof HeaderParameter) {
+            p.isHeaderParam = true;
+        } else if (param instanceof CookieParameter) {
+            p.isCookieParam = true;
+        } else if (param instanceof BodyParameter) {
+            p.isBodyParam = true;
+            p.isBinary = p.dataType.toLowerCase().startsWith("byte");
+        } else if (param instanceof FormParameter) {
+            if ("file".equalsIgnoreCase(((FormParameter) param).getType())) {
+                p.isFile = true;
+            } else if("file".equals(p.baseType)){
+                p.isFile = true;
+            } else {
+                p.notFile = true;
+            }
+            p.isFormParam = true;
+        }
+
+        postProcessParameter(p);
+        return p;
+    }
+
+    /**
+     * Convert map of Swagger SecuritySchemeDefinition objects to a list of Codegen Security objects
+     *
+     * @param schemes a map of Swagger SecuritySchemeDefinition object
+     * @return a list of Codegen Security objects
+     */
+    @SuppressWarnings("static-method")
+    public List<CodegenSecurity> fromSecurity(Map<String, SecuritySchemeDefinition> schemes) {
+        if (schemes == null) {
+        	return Collections.emptyList();
+        }
+
+        List<CodegenSecurity> secs = new ArrayList<CodegenSecurity>(schemes.size());
+        for (Iterator<Map.Entry<String, SecuritySchemeDefinition>> it = schemes.entrySet().iterator(); it.hasNext(); ) {
+            final Map.Entry<String, SecuritySchemeDefinition> entry = it.next();
+            final SecuritySchemeDefinition schemeDefinition = entry.getValue();
+
+            CodegenSecurity sec = CodegenModelFactory.newInstance(CodegenModelType.SECURITY);
+            sec.name = entry.getKey();
+            sec.type = schemeDefinition.getType();
+
+            if (schemeDefinition instanceof ApiKeyAuthDefinition) {
+                final ApiKeyAuthDefinition apiKeyDefinition = (ApiKeyAuthDefinition) schemeDefinition;
+                sec.isBasic = sec.isOAuth = false;
+                sec.isApiKey = true;
+                sec.keyParamName = apiKeyDefinition.getName();
+                sec.isKeyInHeader = apiKeyDefinition.getIn() == In.HEADER;
+                sec.isKeyInQuery = !sec.isKeyInHeader;
+            } else if(schemeDefinition instanceof BasicAuthDefinition) {
+                sec.isKeyInHeader = sec.isKeyInQuery = sec.isApiKey = sec.isOAuth = false;
+                sec.isBasic = true;
+            } else {
+            	final OAuth2Definition oauth2Definition = (OAuth2Definition) schemeDefinition;
+            	sec.isKeyInHeader = sec.isKeyInQuery = sec.isApiKey = sec.isBasic = false;
+                sec.isOAuth = true;
+                sec.flow = oauth2Definition.getFlow();
+                sec.authorizationUrl = oauth2Definition.getAuthorizationUrl();
+                sec.tokenUrl = oauth2Definition.getTokenUrl();
+                if (oauth2Definition.getScopes() != null) {
+                    List<Map<String, Object>> scopes = new ArrayList<Map<String, Object>>();
+                    int count = 0, numScopes = oauth2Definition.getScopes().size();
+                    for(Map.Entry<String, String> scopeEntry : oauth2Definition.getScopes().entrySet()) {
+                        Map<String, Object> scope = new HashMap<String, Object>();
+                        scope.put("scope", scopeEntry.getKey());
+                        scope.put("description", scopeEntry.getValue());
+
+                        count += 1;
+                        if (count < numScopes) {
+                            scope.put("hasMore", "true");
+                        } else {
+                            scope.put("hasMore", null);
+                        }
+
+                        scopes.add(scope);
+                    }
+                    sec.scopes = scopes;
+                }
+            }
+
+            sec.hasMore = it.hasNext();
+            secs.add(sec);
+        }
+        return secs;
+    }
+
+    protected void setReservedWordsLowerCase(List<String> words) {
+      reservedWords = new HashSet<String>();
+      for (String word : words) {
+          reservedWords.add(word.toLowerCase());
+      }
+    }
+
+    protected boolean isReservedWord(String word) {
+        return word != null && reservedWords.contains(word.toLowerCase());
+    }
+
+    /**
+     * Get operationId from the operation object, and if it's blank, generate a new one from the given parameters.
+     *
+     * @param operation the operation object
+     * @param path the path of the operation
+     * @param httpMethod the HTTP method of the operation
+     * @return the (generated) operationId
+     */
+    protected String getOrGenerateOperationId(Operation operation, String path, String httpMethod) {
+        String operationId = operation.getOperationId();
+        if (StringUtils.isBlank(operationId)) {
+            String tmpPath = path;
+            tmpPath = tmpPath.replaceAll("\\{", "");
+            tmpPath = tmpPath.replaceAll("\\}", "");
+            String[] parts = (tmpPath + "/" + httpMethod).split("/");
+            StringBuilder builder = new StringBuilder();
+            if ("/".equals(tmpPath)) {
+                // must be root tmpPath
+                builder.append("root");
+            }
+            for (int i = 0; i < parts.length; i++) {
+                String part = parts[i];
+                if (part.length() > 0) {
+                    if (builder.toString().length() == 0) {
+                        part = Character.toLowerCase(part.charAt(0)) + part.substring(1);
+                    } else {
+                        part = initialCaps(part);
+                    }
+                    builder.append(part);
+                }
+            }
+            operationId = sanitizeName(builder.toString());
+            LOGGER.warn("Empty operationId found for path: " + httpMethod + " " + path + ". Renamed to auto-generated operationId: " + operationId);
+        }
+        return operationId;
+    }
+
+    /**
+     * Check the type to see if it needs import the library/module/package
+     *
+     * @param type name of the type
+     * @return true if the library/module/package of the corresponding type needs to be imported
+     */
+    protected boolean needToImport(String type) {
+        return !defaultIncludes.contains(type)
+            && !languageSpecificPrimitives.contains(type);
+    }
+
+    @SuppressWarnings("static-method")
+    protected List<Map<String, Object>> toExamples(Map<String, Object> examples) {
+        if (examples == null) {
+            return null;
+        }
+
+        final List<Map<String, Object>> output = new ArrayList<Map<String, Object>>(examples.size());
+        for (Map.Entry<String, Object> entry : examples.entrySet()) {
+            final Map<String, Object> kv = new HashMap<String, Object>();
+            kv.put("contentType", entry.getKey());
+            kv.put("example", entry.getValue());
+            output.add(kv);
+        }
+        return output;
+    }
+
+    private void addHeaders(Response response, List<CodegenProperty> target) {
+        if (response.getHeaders() != null) {
+            for (Map.Entry<String, Property> headers : response.getHeaders().entrySet()) {
+                target.add(fromProperty(headers.getKey(), headers.getValue()));
+            }
+        }
+    }
+
+    private static List<CodegenParameter> addHasMore(List<CodegenParameter> objs) {
+        if (objs != null) {
+            for (int i = 0; i < objs.size(); i++) {
+                if (i > 0) {
+                    objs.get(i).secondaryParam = new Boolean(true);
+                }
+                if (i < objs.size() - 1) {
+                    objs.get(i).hasMore = new Boolean(true);
+                }
+            }
+        }
+        return objs;
+    }
+
+    private static Map<String, Object> addHasMore(Map<String, Object> objs) {
+        if (objs != null) {
+            for (int i = 0; i < objs.size() - 1; i++) {
+                if (i > 0) {
+                    objs.put("secondaryParam", new Boolean(true));
+                }
+                if (i < objs.size() - 1) {
+                    objs.put("hasMore", true);
+                }
+            }
+        }
+        return objs;
+    }
+
+    /**
+     * Add operation to group
+     *
+     * @param tag name of the tag
+     * @param resourcePath path of the resource
+     * @param operation Swagger Operation object
+     * @param co Codegen Operation object
+     * @param operations map of Codegen operations
+     */
+    @SuppressWarnings("static-method")
+    public void addOperationToGroup(String tag, String resourcePath, Operation operation, CodegenOperation co, Map<String, List<CodegenOperation>> operations) {
+        List<CodegenOperation> opList = operations.get(tag);
+        if (opList == null) {
+            opList = new ArrayList<CodegenOperation>();
+            operations.put(tag, opList);
+        }
+        // check for operationId uniqueness
+
+        String uniqueName = co.operationId;
+        int counter = 0;
+        for(CodegenOperation op : opList) {
+            if(uniqueName.equals(op.operationId)) {
+                uniqueName = co.operationId + "_" + counter;
+                counter ++;
+            }
+        }
+        if(!co.operationId.equals(uniqueName)) {
+            LOGGER.warn("generated unique operationId `" + uniqueName + "`");
+        }
+        co.operationId = uniqueName;
+        co.operationIdLowerCase = uniqueName.toLowerCase();
+        opList.add(co);
+        co.baseName = tag;
+    }
+
+    private void addParentContainer(CodegenModel m, String name, Property property) {
+        final CodegenProperty tmp = fromProperty(name, property);
+        addImport(m, tmp.complexType);
+        m.parent = toInstantiationType(property);
+        final String containerType = tmp.containerType;
+        final String instantiationType = instantiationTypes.get(containerType);
+        if (instantiationType != null) {
+            addImport(m, instantiationType);
+        }
+        final String mappedType = typeMapping.get(containerType);
+        if (mappedType != null) {
+            addImport(m, mappedType);
+        }
+    }
+
+    /**
+     * Underscore the given word.
+     * Copied from Twitter elephant bird
+     * https://github.com/twitter/elephant-bird/blob/master/core/src/main/java/com/twitter/elephantbird/util/Strings.java
+     *
+     * @param word The word
+     * @return The underscored version of the word
+     */
+    public static String underscore(String word) {
+        String firstPattern = "([A-Z]+)([A-Z][a-z])";
+        String secondPattern = "([a-z\\d])([A-Z])";
+        String replacementPattern = "$1_$2";
+        // Replace package separator with slash.
+        word = word.replaceAll("\\.", "/"); // FIXME: a parameter should not be assigned. Also declare the methods parameters as 'final'.
+        // Replace $ with two underscores for inner classes.
+        word = word.replaceAll("\\$", "__");
+        // Replace capital letter with _ plus lowercase letter.
+        word = word.replaceAll(firstPattern, replacementPattern);
+        word = word.replaceAll(secondPattern, replacementPattern);
+        word = word.replace('-', '_');
+        word = word.toLowerCase();
+        return word;
+    }
+
+    /**
+     * Dashize the given word.
+     *
+     * @param word The word
+     * @return The dashized version of the word, e.g. "my-name"
+     */
+    @SuppressWarnings("static-method")
+    protected String dashize(String word) {
+        return underscore(word).replaceAll("[_ ]", "-");
+    }
+
+    /**
+     * Generate the next name for the given name, i.e. append "2" to the base name if not ending with a number,
+     * otherwise increase the number by 1. For example:
+     *   status    => status2
+     *   status2   => status3
+     *   myName100 => myName101
+     *
+     * @param name The base name
+     * @return The next name for the base name
+     */
+    private static String generateNextName(String name) {
+        Pattern pattern = Pattern.compile("\\d+\\z");
+        Matcher matcher = pattern.matcher(name);
+        if (matcher.find()) {
+            String numStr = matcher.group();
+            int num = Integer.parseInt(numStr) + 1;
+            return name.substring(0, name.length() - numStr.length()) + num;
+        } else {
+            return name + "2";
+        }
+    }
+
+    private void addImport(CodegenModel m, String type) {
+        if (type != null && needToImport(type)) {
+            m.imports.add(type);
+        }
+    }
+
+    private void addVars(CodegenModel m, Map<String, Property> properties, List<String> required) {
+        addVars(m, properties, required, null, null);
+    }
+
+    private void addVars(CodegenModel m, Map<String, Property> properties, List<String> required,
+            Map<String, Property> allProperties, List<String> allRequired) {
+
+        if (properties != null && !properties.isEmpty()) {
+            m.hasVars = true;
+            m.hasEnums = false;
+
+
+            Set<String> mandatory = required == null ? Collections.<String> emptySet()
+                    : new TreeSet<String>(required);
+            addVars(m, m.vars, properties, mandatory);
+            m.allMandatory = m.mandatory = mandatory;
+        } else {
+            m.emptyVars = true;
+            m.hasVars = false;
+            m.hasEnums = false;
+        }
+
+        if (allProperties != null) {
+            Set<String> allMandatory = allRequired == null ? Collections.<String> emptySet()
+                    : new TreeSet<String>(allRequired);
+            addVars(m, m.allVars, allProperties, allMandatory);
+            m.allMandatory = allMandatory;
+        }
+    }
+
+    private void addVars(CodegenModel m, List<CodegenProperty> vars, Map<String, Property> properties, Set<String> mandatory) {
+        // convert set to list so that we can access the next entry in the loop
+        List<Map.Entry<String, Property>> propertyList = new ArrayList<Map.Entry<String, Property>>(properties.entrySet());
+        final int totalCount = propertyList.size();
+        for (int i = 0; i < totalCount; i++) {
+            Map.Entry<String, Property> entry = propertyList.get(i);
+            
+            final String key = entry.getKey();
+            final Property prop = entry.getValue();
+
+            if (prop == null) {
+                LOGGER.warn("null property for " + key);
+            } else {
+                final CodegenProperty cp = fromProperty(key, prop);
+                cp.required = mandatory.contains(key) ? true : null;
+                if (cp.isEnum) {
+                    // FIXME: if supporting inheritance, when called a second time for allProperties it is possible for
+                    // m.hasEnums to be set incorrectly if allProperties has enumerations but properties does not.
+                    m.hasEnums = true;
+                }
+
+                if (i+1 != totalCount) {
+                    cp.hasMore = true;
+                    // check the next entry to see if it's read only
+                    if (!Boolean.TRUE.equals(propertyList.get(i+1).getValue().getReadOnly())) {
+                        cp.hasMoreNonReadOnly = true; // next entry is not ready only
+                    }
+                }
+
+                if (cp.isContainer != null) {
+                    addImport(m, typeMapping.get("array"));
+                }
+
+                addImport(m, cp.baseType);
+                addImport(m, cp.complexType);
+                vars.add(cp);
+            }
+        }
+    }
+
+    /**
+     * Remove characters not suitable for variable or method name from the input and camelize it
+     *
+     * @param name string to be camelize
+     * @return camelized string
+     */
+    @SuppressWarnings("static-method")
+    public String removeNonNameElementToCamelCase(String name) {
+        String nonNameElementPattern = "[-_:;#]";
+        name = StringUtils.join(Lists.transform(Lists.newArrayList(name.split(nonNameElementPattern)), new Function<String, String>() { // FIXME: a parameter should not be assigned. Also declare the methods parameters as 'final'.
+            @Nullable
+            @Override
+            public String apply(String input) {
+                return StringUtils.capitalize(input);
+            }
+        }), "");
+        if (name.length() > 0) {
+            name = name.substring(0, 1).toLowerCase() + name.substring(1);
+        }
+        return name;
+    }
+
+    /**
+     * Camelize name (parameter, property, method, etc) with upper case for first letter
+     * copied from Twitter elephant bird
+     * https://github.com/twitter/elephant-bird/blob/master/core/src/main/java/com/twitter/elephantbird/util/Strings.java
+     *
+     * @param word string to be camelize
+     * @return camelized string
+     */
+    public static String camelize(String word) {
+        return camelize(word, false);
+    }
+
+    /**
+     * Camelize name (parameter, property, method, etc)
+     *
+     * @param word string to be camelize
+     * @param lowercaseFirstLetter lower case for first letter if set to true
+     * @return camelized string
+     */
+    public static String camelize(String word, boolean lowercaseFirstLetter) {
+        // Replace all slashes with dots (package separator)
+        Pattern p = Pattern.compile("\\/(.?)");
+        Matcher m = p.matcher(word);
+        while (m.find()) {
+            word = m.replaceFirst("." + m.group(1)/*.toUpperCase()*/); // FIXME: a parameter should not be assigned. Also declare the methods parameters as 'final'.
+            m = p.matcher(word);
+        }
+
+        // case out dots
+        String[] parts = word.split("\\.");
+        StringBuilder f = new StringBuilder();
+        for (String z : parts) {
+            if (z.length() > 0) {
+                f.append(Character.toUpperCase(z.charAt(0))).append(z.substring(1));
+            }
+        }
+        word = f.toString();
+
+        m = p.matcher(word);
+        while (m.find()) {
+            word = m.replaceFirst("" + Character.toUpperCase(m.group(1).charAt(0)) + m.group(1).substring(1)/*.toUpperCase()*/);
+            m = p.matcher(word);
+        }
+
+        // Uppercase the class name.
+        p = Pattern.compile("(\\.?)(\\w)([^\\.]*)$");
+        m = p.matcher(word);
+        if (m.find()) {
+            String rep = m.group(1) + m.group(2).toUpperCase() + m.group(3);
+            rep = rep.replaceAll("\\$", "\\\\\\$");
+            word = m.replaceAll(rep);
+        }
+
+        // Remove all underscores
+        p = Pattern.compile("(_)(.)");
+        m = p.matcher(word);
+        while (m.find()) {
+            word = m.replaceFirst(m.group(2).toUpperCase());
+            m = p.matcher(word);
+        }
+
+        if (lowercaseFirstLetter) {
+            word = word.substring(0, 1).toLowerCase() + word.substring(1);
+        }
+
+        return word;
+    }
+
+    public String apiFilename(String templateName, String tag) {
+        String suffix = apiTemplateFiles().get(templateName);
+        return apiFileFolder() + '/' + toApiFilename(tag) + suffix;
+    }
+
+    /**
+     * Return the full path and API documentation file
+     *
+     * @param templateName template name
+     * @param tag tag
+     *
+     * @return the API documentation file name with full path
+     */
+    public String apiDocFilename(String templateName, String tag) {
+        String suffix = apiDocTemplateFiles().get(templateName);
+        return apiDocFileFolder() + '/' + toApiDocFilename(tag) + suffix;
+    }
+
+    /**
+     * Return the full path and API test file
+     *
+     * @param templateName template name
+     * @param tag tag
+     *
+     * @return the API test file name with full path
+     */
+    public String apiTestFilename(String templateName, String tag) {
+        String suffix = apiTestTemplateFiles().get(templateName);
+        return apiTestFileFolder() + '/' + toApiTestFilename(tag) + suffix;
+    }
+
+    public boolean shouldOverwrite(String filename) {
+        return !(skipOverwrite && new File(filename).exists());
+    }
+
+    public boolean isSkipOverwrite() {
+        return skipOverwrite;
+    }
+
+    public void setSkipOverwrite(boolean skipOverwrite) {
+        this.skipOverwrite = skipOverwrite;
+    }
+
+    /**
+     * All library templates supported.
+     * (key: library name, value: library description)
+     * @return the supported libraries
+     */
+    public Map<String, String> supportedLibraries() {
+        return supportedLibraries;
+    }
+
+    /**
+     * Set library template (sub-template).
+     *
+     * @param library Library template 
+     */
+    public void setLibrary(String library) {
+        if (library != null && !supportedLibraries.containsKey(library))
+            throw new RuntimeException("unknown library: " + library);
+        this.library = library;
+    }
+
+    /**
+     * Library template (sub-template).
+     *
+     * @return Library template
+     */
+    public String getLibrary() {
+        return library;
+    }
+
+    /**
+     * Set Git user ID.
+     *
+     * @param gitUserId Git user ID 
+     */
+    public void setGitUserId(String gitUserId) {
+        this.gitUserId = gitUserId;
+    }
+
+    /**
+     * Git user ID
+     *
+     * @return Git user ID
+     */
+    public String getGitUserId() {
+        return gitUserId;
+    }
+
+    /**
+     * Set Git repo ID.
+     *
+     * @param gitRepoId Git repo ID 
+     */
+    public void setGitRepoId(String gitRepoId) {
+        this.gitRepoId = gitRepoId;
+    }
+
+    /**
+     * Git repo ID
+     *
+     * @return Git repo ID
+     */
+    public String getGitRepoId() {
+        return gitRepoId;
+    }
+
+    /**
+     * Set release note.
+     *
+     * @param releaseNote Release note
+     */
+    public void setReleaseNote(String releaseNote) {
+        this.releaseNote = releaseNote;
+    }
+
+    /**
+     * Release note
+     *
+     * @return Release note
+     */
+    public String getReleaseNote() {
+        return releaseNote;
+    }
+
+    /**
+     * Set HTTP user agent.
+     *
+     * @param httpUserAgent HTTP user agent
+     */
+    public void setHttpUserAgent(String httpUserAgent) {
+        this.httpUserAgent = httpUserAgent;
+    }
+
+    /**
+     * HTTP user agent 
+     *
+     * @return HTTP user agent
+     */
+    public String getHttpUserAgent() {
+        return httpUserAgent;
+    }
+
+    @SuppressWarnings("static-method")
+    protected CliOption buildLibraryCliOption(Map<String, String> supportedLibraries) {
+        StringBuilder sb = new StringBuilder("library template (sub-template) to use:");
+        for (String lib : supportedLibraries.keySet()) {
+            sb.append("\n").append(lib).append(" - ").append(supportedLibraries.get(lib));
+        }
+        return new CliOption("library", sb.toString());
+    }
+
+    /**
+     * Sanitize name (parameter, property, method, etc)
+     *
+     * @param name string to be sanitize
+     * @return sanitized string
+     */
+    @SuppressWarnings("static-method")
+    public String sanitizeName(String name) {
+        // NOTE: performance wise, we should have written with 2 replaceAll to replace desired
+        // character with _ or empty character. Below aims to spell out different cases we've
+        // encountered so far and hopefully make it easier for others to add more special
+        // cases in the future.
+
+    	// better error handling when map/array type is invalid
+    	if (name == null) {
+    	    LOGGER.error("String to be sanitized is null. Default to ERROR_UNKNOWN");
+    	    return "ERROR_UNKNOWN";
+    	}
+
+        // if the name is just '$', map it to 'value' for the time being.
+        if ("$".equals(name)) {
+            return "value";
+        }
+
+        // input[] => input
+        name = name.replaceAll("\\[\\]", ""); // FIXME: a parameter should not be assigned. Also declare the methods parameters as 'final'.
+
+        // input[a][b] => input_a_b
+        name = name.replaceAll("\\[", "_");
+        name = name.replaceAll("\\]", "");
+
+        // input(a)(b) => input_a_b
+        name = name.replaceAll("\\(", "_");
+        name = name.replaceAll("\\)", "");
+
+        // input.name => input_name
+        name = name.replaceAll("\\.", "_");
+
+        // input-name => input_name
+        name = name.replaceAll("-", "_");
+
+        // input name and age => input_name_and_age
+        name = name.replaceAll(" ", "_");
+
+        // remove everything else other than word, number and _
+        // $php_variable => php_variable
+        return name.replaceAll("[^a-zA-Z0-9_]", "");
+    }
+
+    @SuppressWarnings("static-method")
+    public String sanitizeTag(String tag) {
+        // remove spaces and make strong case
+        String[] parts = tag.split(" ");
+        StringBuilder buf = new StringBuilder();
+        for (String part : parts) {
+            if (StringUtils.isNotEmpty(part)) {
+                buf.append(StringUtils.capitalize(part));
+            }
+        }
+        return buf.toString().replaceAll("[^a-zA-Z ]", "");
+    }
+
+    /**
+     * Only write if the file doesn't exist
+     *
+     * @param outputFolder Output folder
+     * @param supportingFile Supporting file
+     */
+    public void writeOptional(String outputFolder, SupportingFile supportingFile) {
+        String folder = "";
+
+        if(outputFolder != null && !"".equals(outputFolder)) {
+            folder += outputFolder + File.separator;
+        }
+        folder += supportingFile.folder;
+        if(!"".equals(folder)) {
+            folder += File.separator + supportingFile.destinationFilename;
+        }
+        else {
+            folder = supportingFile.destinationFilename;
+        }
+        if(!new File(folder).exists()) {
+            supportingFiles.add(supportingFile);
+        } else {
+            LOGGER.info("Skipped overwriting " + supportingFile.destinationFilename + " as the file already exists in " + folder);
+        }
+    }
+
+    /**
+     * Set CodegenParameter boolean flag using CodegenProperty.
+     *
+     * @param parameter Codegen Parameter
+     * @param property  Codegen property
+     */
+    public void setParameterBooleanFlagWithCodegenProperty(CodegenParameter parameter, CodegenProperty property) {
+        if (parameter == null) {
+            LOGGER.error("Codegen Parameter cannnot be null.");
+            return;
+        }
+
+        if (property == null) {
+            LOGGER.error("Codegen Property cannot be null.");
+            return;
+        }
+
+        if (Boolean.TRUE.equals(property.isString)) {
+            parameter.isString = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isBoolean)) {
+            parameter.isBoolean = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isLong)) {
+            parameter.isLong = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isInteger)) {
+            parameter.isInteger = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isDouble)) {
+            parameter.isDouble = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isFloat)) {
+            parameter.isFloat = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isByteArray)) {
+            parameter.isByteArray = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isBinary)) {
+            parameter.isByteArray = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isDate)) {
+            parameter.isDate = true;
+            parameter.isPrimitiveType = true;
+        } else if (Boolean.TRUE.equals(property.isDateTime)) {
+            parameter.isDateTime = true;
+            parameter.isPrimitiveType = true;
+        } else {
+            LOGGER.debug("Property type is not primitive: " + property.datatype);
+        }
+    }
+}

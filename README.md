@@ -1,0 +1,1 @@
+# JaSDS swagger codegen
