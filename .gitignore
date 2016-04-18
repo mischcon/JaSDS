@@ -1,0 +1,4 @@
+/modules/swagger-codegen/target/
+/modules/swagger-codegen-cli/target/
+/modules/swagger-codegen-maven-plugin/target/
+/modules/swagger-generator/target/
